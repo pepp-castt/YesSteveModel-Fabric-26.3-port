@@ -24,9 +24,11 @@ base {
 java.toolchain.languageVersion = JavaLanguageVersion.of(25)
 
 loom {
+    splitEnvironmentSourceSets()
     mods {
         ysm {
             sourceSet sourceSets.main
+            sourceSet sourceSets.client
         }
     }
 
@@ -52,6 +54,13 @@ loom {
         }
     }
 }
+
+// The 26.1.2 fork intentionally keeps its Fabric initializer and shared APIs in the
+// common source set, even though many implementation classes use client-only APIs.
+// 26.3's split source-set setup no longer exposes those client classes to main at
+// compile time, so preserve the upstream architecture while explicitly extending
+// main's compile classpath with the client compile classpath.
+sourceSets.main.compileClasspath += sourceSets.client.compileClasspath
 
 sourceSets.main.resources { srcDir 'src/generated/resources' }
 
