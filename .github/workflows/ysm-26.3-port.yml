@@ -1,0 +1,137 @@
+name: YSM Fabric 26.3 Port
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - port/fabric-26.3
+
+jobs:
+  build-and-verify:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Java 17
+        id: java17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Java 25
+        id: java25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+
+      - name: Configure Gradle toolchains
+        shell: pwsh
+        run: |
+          $paths = '${{ steps.java17.outputs.path }},${{ steps.java25.outputs.path }}'
+          "GRADLE_OPTS=-Dorg.gradle.java.installations.paths=$paths" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify toolchain
+        shell: pwsh
+        run: |
+          java -version
+          .\gradlew.bat --version
+
+      - name: Build
+        shell: pwsh
+        run: .\gradlew.bat build --no-daemon --stacktrace
+
+      - name: Stale-version scan
+        shell: pwsh
+        run: |
+          $hits = git grep -n -E '26\.1\.2|0\.155\.2\+26\.1\.2' -- ':!gradle/wrapper' ':!PORTING_LOG.md' ':!.git'
+          if ($LASTEXITCODE -eq 0 -and $hits) {
+            Write-Host $hits
+            exit 1
+          }
+
+      - name: Jar sanity
+        shell: pwsh
+        run: |
+          $jars = Get-ChildItem -Path build\libs -Filter *.jar
+          if (-not $jars) { throw 'No jar produced' }
+          $jars | Format-Table FullName,Length,LastWriteTime
+          foreach ($jar in $jars) {
+            jar tf $jar.FullName | Select-String 'fabric.mod.json|ysm.mixins.json'
+            Get-FileHash $jar.FullName -Algorithm SHA256
+          }
+
+      - name: Upload jars
+        uses: actions/upload-artifact@v4
+        with:
+          name: ysm-fabric-26.3-candidate
+          path: build/libs/*.jar
+
+  server-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    needs: build-and-verify
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Java 17
+        id: java17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Java 25
+        id: java25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+
+      - name: Configure Gradle toolchains
+        shell: pwsh
+        run: |
+          $paths = '${{ steps.java17.outputs.path }},${{ steps.java25.outputs.path }}'
+          "GRADLE_OPTS=-Dorg.gradle.java.installations.paths=$paths" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Start dedicated server
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath '.\gradlew.bat' -ArgumentList 'runServer','--no-daemon' -PassThru -RedirectStandardOutput 'server.stdout.log' -RedirectStandardError 'server.stderr.log'
+          $deadline = (Get-Date).AddMinutes(6)
+          $ready = $false
+          while ((Get-Date) -lt $deadline) {
+            if ($p.HasExited) { break }
+            if (Test-Path 'run\server\logs\latest.log') {
+              $log = Get-Content 'run\server\logs\latest.log' -Raw
+              if ($log -match 'Done \(') { $ready = $true; break }
+              if ($log -match 'ERROR|Exception|Mixin') { break }
+            }
+            Start-Sleep -Seconds 5
+          }
+          if (!$ready) {
+            if (Test-Path 'run\server\logs\latest.log') { Get-Content 'run\server\logs\latest.log' -Tail 200 }
+            Get-Content 'server.stdout.log' -Tail 100
+            Get-Content 'server.stderr.log' -Tail 100
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            throw 'Dedicated server did not reach a ready state'
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+
+      - name: Upload server logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ysm-26.3-server-smoke-logs
+          path: |
+            run/server/logs/latest.log
+            server.stdout.log
+            server.stderr.log
